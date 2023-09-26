@@ -1,0 +1,148 @@
+#!/usr/bin/python3
+
+import os
+import sys
+import glob
+import os.path
+import argparse
+import subprocess
+from loguru import logger
+import src.fridadownloader as fridadownloader
+import src.patcher as patcher
+
+
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+
+
+def check_tools():
+    try:
+        subprocess.check_output(["frida", "--version"])
+    except Exception:
+        raise Exception("Frida is not installed")
+
+    try:
+        subprocess.check_output(["aapt", "version"])
+    except Exception:
+        raise Exception("aapt is not installed")
+
+    try:
+        subprocess.check_output(["adb", "--version"])
+    except Exception:
+        raise Exception("adb is not installed")
+
+    try:
+        subprocess.check_output(["apktool", "--version"])
+    except Exception:
+        raise Exception("Apktool is not installed")
+
+    try:
+        subprocess.check_output(["unxz", "--version"])
+    except Exception:
+        raise Exception("unxz is not installed")
+
+
+def main():
+    check_tools()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--apk", help="Specify the apk you want to patch")
+    parser.add_argument("--gadget", help="Specify the frida-gadget file")
+    parser.add_argument("--script", help="Script to inject")
+    parser.add_argument("--init", help="Download Frida gadgets", action="store_true")
+    parser.add_argument(
+        "--force-extract-resources",
+        help="Force extract resources and manifest",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--use-aapt2", help="Use aapt2 with apktool", action="store_true"
+    )
+    parser.add_argument("--output-file", help="Specify the output file (patched)")
+    args = parser.parse_args()
+
+    if len(sys.argv) == 1:
+        parser.print_help()
+        return 1
+
+    if args.download_gadgets:
+        fridadownloader.download_gadgets()
+        return 0
+
+    if not args.apk:
+        parser.print_help()
+        return 1
+    else:
+        if not os.path.isfile(args.apk):
+            raise Exception("The file {0} couldn't be found!".format(args.apk))
+    gadget_to_use = None
+    if args.gadget:
+        gadget_to_use = args.gadget
+    else:
+        gadget_to_use = patcher.get_recommended_gadget()
+
+    if not gadget_to_use or not os.path.isfile(gadget_to_use):
+        raise Exception("Could not identify the gadget")
+
+    t = glob.glob(os.path.join(SCRIPT_DIR, "ext", "uber-apk-signer", "*.jar"))
+    if len(t) != 1:
+        raise Exception("uber-apk-signer not found")
+    uber_apk_signer_path: str = t[0]
+
+    apk_file_path = args.apk
+    temporary_path = patcher.create_temp_folder_for_apk(apk_file_path)
+
+    if args.force_extract_resources:
+        patcher.extract_apk(apk_file_path, temporary_path, extract_resources=True)
+
+    else:
+        patcher.extract_apk(apk_file_path, temporary_path, extract_resources=False)
+
+    entrypoint_class = patcher.get_entrypoint_class_name(apk_file_path)
+    if not entrypoint_class:
+        raise Exception("Could not identify the entrypoint class")
+    logger.debug("Entrypoint class: {0}".format(entrypoint_class))
+    entrypoint_smali_path = patcher.get_entrypoint_smali_path(
+        temporary_path, entrypoint_class
+    )
+    if not entrypoint_smali_path:
+        raise Exception("Could not identify the entrypoint smali path")
+    logger.debug("Entrypoint smali path: {0}".format(entrypoint_smali_path))
+    patcher.insert_frida_loader(entrypoint_smali_path)
+
+    if args.autoload_script:
+        script_file = args.autoload_script
+        if not os.path.isfile(script_file):
+            return 1
+
+        default_config_file = patcher.get_default_config_file()
+        patcher.insert_frida_lib(
+            temporary_path,
+            gadget_to_use,
+            config_file_path=default_config_file,
+            auto_load_script_path=script_file,
+        )
+
+    else:
+        patcher.insert_frida_lib(temporary_path, gadget_to_use)
+
+    apk_file_name = apk_file_path.split("/")[-1]
+
+    output_file_path = patcher.repackage_apk(
+        temporary_path,
+        apk_file_name,
+        target_file=args.output_file,
+        use_aapt2=args.use_aapt2,
+    )
+
+    patcher.sign(output_file_path, uber_apk_signer_path, temporary_path)
+
+    logger.debug(
+        "The temporary folder was not deleted. Find it at {0}".format(temporary_path)
+    )
+    logger.debug("Your file is located at {0}.".format(output_file_path))
+
+    return 0
+
+
+if __name__ == "__main__":
+    main()

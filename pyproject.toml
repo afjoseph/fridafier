@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "fridafier"
+version = "1.0.0"
+description = ""
+authors = ["afjoseph"]
+license = "BSD-3"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+loguru = "^0.7.2"
+requests = "^2.31.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
